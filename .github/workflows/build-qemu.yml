@@ -32,29 +32,36 @@ jobs:
             flex \
             bison \
             zstd \
-            apt-utils
+            binutils
 
-      - name: 5. Termux 최신 GLib 및 Pixman 패키지 다운로드 및 NDK 주입
+      - name: 5. Termux GLib & Pixman 패키지 다운로드 및 NDK 주입
         run: |
           export NDK=$ANDROID_HOME/ndk/25.2.9519653
           export SYSROOT=$NDK/toolchains/llvm/prebuilt/linux-x86_64/sysroot
           
           mkdir -p termux_deps && cd termux_deps
           
-          # Termux APT 저장소 인덱스 다운로드 후 최신 deb 경로 파싱
-          curl -sL https://packages.termux.dev/apt/termux-main/dists/stable/main/binary-aarch64/Packages.xz | xz -d > Packages
+          # GitHub Termux 패키지 인덱스 API를 통해 최신 aarch64 deb 파싱 및 다운로드
+          curl -s https://api.github.com/repos/termux/termux-packages/releases | grep "browser_download_url" > urls.txt || true
+          
+          # 공식 미러 사이트 주소 직접 탐색 (안전한 폴백 방식)
+          MIRROR="https://packages.termux.dev/apt/termux-main"
+          
+          # Packages 파일 수동 압축해제 파싱
+          wget -q "$MIRROR/dists/stable/main/binary-aarch64/Packages.gz" -O Packages.gz
+          gzip -d Packages.gz
           
           GLIB_URL=$(grep -A 10 "Package: glib" Packages | grep "Filename:" | head -n 1 | awk '{print $2}')
           PIXMAN_URL=$(grep -A 10 "Package: libpixman" Packages | grep "Filename:" | head -n 1 | awk '{print $2}')
           ICONV_URL=$(grep -A 10 "Package: libiconv" Packages | grep "Filename:" | head -n 1 | awk '{print $2}')
           PCRE2_URL=$(grep -A 10 "Package: pcre2" Packages | grep "Filename:" | head -n 1 | awk '{print $2}')
           
-          wget "https://packages.termux.dev/apt/termux-main/$GLIB_URL" -O glib.deb
-          wget "https://packages.termux.dev/apt/termux-main/$PIXMAN_URL" -O pixman.deb
-          wget "https://packages.termux.dev/apt/termux-main/$ICONV_URL" -O iconv.deb
-          wget "https://packages.termux.dev/apt/termux-main/$PCRE2_URL" -O pcre2.deb
+          wget -q "$MIRROR/$GLIB_URL" -O glib.deb
+          wget -q "$MIRROR/$PIXMAN_URL" -O pixman.deb
+          wget -q "$MIRROR/$ICONV_URL" -O iconv.deb
+          wget -q "$MIRROR/$PCRE2_URL" -O pcre2.deb
           
-          # deb 압축 해제 (xz 및 zstd 지원)
+          # deb 파일 풀기
           for deb in *.deb; do
             ar x "$deb"
             if [ -f data.tar.xz ]; then
@@ -64,7 +71,7 @@ jobs:
             fi
           done
           
-          # Header 및 Libs를 NDK sysroot로 복사
+          # NDK sysroot에 헤더 및 바이너리 복사
           cp -r data/data/com.termux/files/usr/include/* $SYSROOT/usr/include/
           cp -r data/data/com.termux/files/usr/lib/* $SYSROOT/usr/lib/aarch64-linux-android/
           
