@@ -20,7 +20,7 @@ jobs:
         run: |
           sdkmanager --install "ndk;25.2.9519653"
 
-      - name: 4. 빌드 필수 호스트 패키지 및 zstd 설치
+      - name: 4. 필수 빌드 도구 설치
         run: |
           sudo apt-get update
           sudo apt-get install -y \
@@ -31,58 +31,86 @@ jobs:
             pkg-config \
             flex \
             bison \
-            zstd \
-            binutils
+            meson
 
-      - name: 5. Termux GLib & Pixman 패키지 다운로드 및 NDK 주입
+      - name: 5. GLib / Pixman / Pcre2 안드로이드용 소스 컴파일 및 NDK Sysroot에 설치
         run: |
           export NDK=$ANDROID_HOME/ndk/25.2.9519653
-          export SYSROOT=$NDK/toolchains/llvm/prebuilt/linux-x86_64/sysroot
+          export TOOLCHAIN=$NDK/toolchains/llvm/prebuilt/linux-x86_64
+          export TARGET=aarch64-linux-android
+          export API=29
+          export SYSROOT=$TOOLCHAIN/sysroot
           
-          mkdir -p termux_deps && cd termux_deps
-          
-          # GitHub Termux 패키지 인덱스 API를 통해 최신 aarch64 deb 파싱 및 다운로드
-          curl -s https://api.github.com/repos/termux/termux-packages/releases | grep "browser_download_url" > urls.txt || true
-          
-          # 공식 미러 사이트 주소 직접 탐색 (안전한 폴백 방식)
-          MIRROR="https://packages.termux.dev/apt/termux-main"
-          
-          # Packages 파일 수동 압축해제 파싱
-          wget -q "$MIRROR/dists/stable/main/binary-aarch64/Packages.gz" -O Packages.gz
-          gzip -d Packages.gz
-          
-          GLIB_URL=$(grep -A 10 "Package: glib" Packages | grep "Filename:" | head -n 1 | awk '{print $2}')
-          PIXMAN_URL=$(grep -A 10 "Package: libpixman" Packages | grep "Filename:" | head -n 1 | awk '{print $2}')
-          ICONV_URL=$(grep -A 10 "Package: libiconv" Packages | grep "Filename:" | head -n 1 | awk '{print $2}')
-          PCRE2_URL=$(grep -A 10 "Package: pcre2" Packages | grep "Filename:" | head -n 1 | awk '{print $2}')
-          
-          wget -q "$MIRROR/$GLIB_URL" -O glib.deb
-          wget -q "$MIRROR/$PIXMAN_URL" -O pixman.deb
-          wget -q "$MIRROR/$ICONV_URL" -O iconv.deb
-          wget -q "$MIRROR/$PCRE2_URL" -O pcre2.deb
-          
-          # deb 파일 풀기
-          for deb in *.deb; do
-            ar x "$deb"
-            if [ -f data.tar.xz ]; then
-              tar -xf data.tar.xz
-            elif [ -f data.tar.zst ]; then
-              tar --zstd -xf data.tar.zst
-            fi
-          done
-          
-          # NDK sysroot에 헤더 및 바이너리 복사
-          cp -r data/data/com.termux/files/usr/include/* $SYSROOT/usr/include/
-          cp -r data/data/com.termux/files/usr/lib/* $SYSROOT/usr/lib/aarch64-linux-android/
-          
+          export CC=$TOOLCHAIN/bin/${TARGET}${API}-clang
+          export CXX=$TOOLCHAIN/bin/${TARGET}${API}-clang++
+          export AR=$TOOLCHAIN/bin/llvm-ar
+          export LD=$TOOLCHAIN/bin/ld
+          export RANLIB=$TOOLCHAIN/bin/llvm-ranlib
+
+          mkdir -p deps && cd deps
+
+          # 1) Pixman 소스 빌드
+          wget https://cgit.freedesktop.org/pixman/snapshot/pixman-0.42.2.tar.gz
+          tar -xf pixman-0.42.2.tar.gz && cd pixman-0.42.2
+          mkdir build && cd build
+          meson setup .. \
+            --cross-file <(cat <<EOF
+          [binaries]
+          c = '$CC'
+          cpp = '$CXX'
+          ar = '$AR'
+          ld = '$LD'
+          [host_machine]
+          system = 'android'
+          cpu_family = 'aarch64'
+          cpu = 'aarch64'
+          endian = 'little'
+          EOF
+          ) \
+            --prefix=$SYSROOT/usr \
+            --default-library=static
+          ninja && ninja install
+          cd ../..
+
+          # 2) PCRE2 소스 빌드 (GLib 필수 의존성)
+          wget https://github.com/PCRE2Project/pcre2/releases/download/pcre2-10.42/pcre2-10.42.tar.gz
+          tar -xf pcre2-10.42.tar.gz && cd pcre2-10.42
+          ./configure --host=$TARGET --prefix=$SYSROOT/usr --enable-static --disable-shared
+          make -j$(nproc) && make install
           cd ..
+
+          # 3) GLib 소스 빌드
+          wget https://download.gnome.org/sources/glib/2.78/glib-2.78.4.tar.xz
+          tar -xf glib-2.78.4.tar.xz && cd glib-2.78.4
+          mkdir build && cd build
+          meson setup .. \
+            --cross-file <(cat <<EOF
+          [binaries]
+          c = '$CC'
+          cpp = '$CXX'
+          ar = '$AR'
+          ld = '$LD'
+          pkg-config = '/usr/bin/pkg-config'
+          [host_machine]
+          system = 'android'
+          cpu_family = 'aarch64'
+          cpu = 'aarch64'
+          endian = 'little'
+          EOF
+          ) \
+            --prefix=$SYSROOT/usr \
+            --default-library=static \
+            -Dtests=false \
+            -Dlibmount=disabled
+          ninja && ninja install
+          cd ../../../
 
       - name: 6. QEMU 8.2.5 소스코드 다운로드
         run: |
           wget https://download.qemu.org/qemu-8.2.5.tar.xz
           tar -xf qemu-8.2.5.tar.xz
 
-      - name: 7. Android ARM64용 QEMU 크로스 컴파일
+      - name: 7. QEMU (aarch64-softmmu) 안드로이드 크로스 컴파일
         run: |
           cd qemu-8.2.5
           
@@ -90,6 +118,7 @@ jobs:
           export TOOLCHAIN=$NDK/toolchains/llvm/prebuilt/linux-x86_64
           export TARGET=aarch64-linux-android
           export API=29
+          export SYSROOT=$TOOLCHAIN/sysroot
           
           export CC=$TOOLCHAIN/bin/${TARGET}${API}-clang
           export CXX=$TOOLCHAIN/bin/${TARGET}${API}-clang++
@@ -98,12 +127,35 @@ jobs:
           export RANLIB=$TOOLCHAIN/bin/llvm-ranlib
           export STRIP=$TOOLCHAIN/bin/llvm-strip
           
-          export PKG_CONFIG_PATH=$TOOLCHAIN/sysroot/usr/lib/aarch64-linux-android/pkgconfig
+          # NDK Sysroot에 설치된 pkgconfig 경로 전달
+          export PKG_CONFIG_PATH=$SYSROOT/usr/lib/aarch64-linux-android/pkgconfig:$SYSROOT/usr/share/pkgconfig:$SYSROOT/usr/lib/pkgconfig
           export PKG_CONFIG_LIBDIR=$PKG_CONFIG_PATH
-          
+          export CFLAGS="-I$SYSROOT/usr/include"
+          export LDFLAGS="-L$SYSROOT/usr/lib -L$SYSROOT/usr/lib/aarch64-linux-android"
+
+          # Meson 용 Cross File 생성
+          cat <<EOF > android.cross
+          [binaries]
+          c = '$CC'
+          cpp = '$CXX'
+          ar = '$AR'
+          ld = '$LD'
+          strip = '$STRIP'
+          pkg-config = '/usr/bin/pkg-config'
+
+          [host_machine]
+          system = 'android'
+          cpu_family = 'aarch64'
+          cpu = 'aarch64'
+          endian = 'little'
+          EOF
+
           ./configure \
             --cross-prefix=${TARGET}- \
             --target-list=aarch64-softmmu \
+            --meson=meson \
+            --extra-cflags="$CFLAGS" \
+            --extra-ldflags="$LDFLAGS" \
             --disable-gtk \
             --disable-glusterfs \
             --disable-libiscsi \
