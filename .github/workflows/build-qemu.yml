@@ -20,7 +20,7 @@ jobs:
         run: |
           sdkmanager --install "ndk;25.2.9519653"
 
-      - name: 4. 빌드 필수 호스트 패키지 설치
+      - name: 4. 빌드 필수 호스트 패키지 및 zstd 설치
         run: |
           sudo apt-get update
           sudo apt-get install -y \
@@ -30,26 +30,38 @@ jobs:
             ninja-build \
             pkg-config \
             flex \
-            bison
+            bison \
+            zstd \
+            apt-utils
 
-      - name: 5. Termux 안드로이드용 Prebuilt GLib & Pixman 다운로드 및 NDK 주입
+      - name: 5. Termux 최신 GLib 및 Pixman 패키지 다운로드 및 NDK 주입
         run: |
           export NDK=$ANDROID_HOME/ndk/25.2.9519653
           export SYSROOT=$NDK/toolchains/llvm/prebuilt/linux-x86_64/sysroot
           
           mkdir -p termux_deps && cd termux_deps
           
-          # Termux 저장소에서 안드로이드 aarch64용 glib, pixman, iconv, pcre2 deb 패키지 받기
-          wget https://packages.termux.dev/apt/termux-main/pool/main/g/glib/glib_2.78.4_aarch64.deb
-          wget https://packages.termux.dev/apt/termux-main/pool/main/p/pixman/libpixman_0.42.2-1_aarch64.deb
-          wget https://packages.termux.dev/apt/termux-main/pool/main/l/libiconv/libiconv_1.17-1_aarch64.deb
-          wget https://packages.termux.dev/apt/termux-main/pool/main/p/pcre2/pcre2_10.42-1_aarch64.deb
-          wget https://packages.termux.dev/apt/termux-main/pool/main/gettext/libandroid-glob_1.0_aarch64.deb
+          # Termux APT 저장소 인덱스 다운로드 후 최신 deb 경로 파싱
+          curl -sL https://packages.termux.dev/apt/termux-main/dists/stable/main/binary-aarch64/Packages.xz | xz -d > Packages
           
-          # 압축 풀어서 NDK sysroot 디렉토리에 강제 주입
+          GLIB_URL=$(grep -A 10 "Package: glib" Packages | grep "Filename:" | head -n 1 | awk '{print $2}')
+          PIXMAN_URL=$(grep -A 10 "Package: libpixman" Packages | grep "Filename:" | head -n 1 | awk '{print $2}')
+          ICONV_URL=$(grep -A 10 "Package: libiconv" Packages | grep "Filename:" | head -n 1 | awk '{print $2}')
+          PCRE2_URL=$(grep -A 10 "Package: pcre2" Packages | grep "Filename:" | head -n 1 | awk '{print $2}')
+          
+          wget "https://packages.termux.dev/apt/termux-main/$GLIB_URL" -O glib.deb
+          wget "https://packages.termux.dev/apt/termux-main/$PIXMAN_URL" -O pixman.deb
+          wget "https://packages.termux.dev/apt/termux-main/$ICONV_URL" -O iconv.deb
+          wget "https://packages.termux.dev/apt/termux-main/$PCRE2_URL" -O pcre2.deb
+          
+          # deb 압축 해제 (xz 및 zstd 지원)
           for deb in *.deb; do
             ar x "$deb"
-            tar -xf data.tar.xz
+            if [ -f data.tar.xz ]; then
+              tar -xf data.tar.xz
+            elif [ -f data.tar.zst ]; then
+              tar --zstd -xf data.tar.zst
+            fi
           done
           
           # Header 및 Libs를 NDK sysroot로 복사
@@ -79,7 +91,6 @@ jobs:
           export RANLIB=$TOOLCHAIN/bin/llvm-ranlib
           export STRIP=$TOOLCHAIN/bin/llvm-strip
           
-          # Meson 크로스 파일 대신 pkg-config 검색 경로를 NDK sysroot로 고정
           export PKG_CONFIG_PATH=$TOOLCHAIN/sysroot/usr/lib/aarch64-linux-android/pkgconfig
           export PKG_CONFIG_LIBDIR=$PKG_CONFIG_PATH
           
